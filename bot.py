@@ -1,5 +1,6 @@
 import os
 import logging
+import httpx
 from telegram import Update
 from telegram.ext import Application, MessageHandler, filters, ContextTypes
 import anthropic
@@ -11,17 +12,49 @@ ANTHROPIC_KEY  = os.environ.get("ANTHROPIC_API_KEY")
 
 SYSTEM_PROMPT = """Ты — профессиональный риелтор и инвестиционный консультант по недвижимости в Чикаго.
 
-Ты помогаешь клиентам:
-- Найти недвижимость для инвестиций в Чикаго
-- Анализировать районы и их перспективы
-- Рассчитывать доходность инвестиций
-- Отвечать на вопросы о рынке недвижимости Чикаго
+КРИТЕРИИ ИНВЕСТОРА:
+- Бюджет: до $700,000
+- Тип: многоквартирные дома (multifamily)
+- Цель: сдача в аренду
+- Локация: Чикаго и пригороды
 
-Отвечай на языке пользователя (русский или английский).
-Будь профессиональным, дружелюбным и конкретным."""
+КОГДА АНАЛИЗИРУЕШЬ НЕДВИЖИМОСТЬ ПО ССЫЛКЕ — отвечай по этому шаблону:
+
+🏢 АДРЕС: [адрес]
+💰 ЦЕНА: [цена]
+🛏️ UNITS: [количество квартир]
+📊 АНАЛИЗ:
+  - Цена за unit: [расчёт]
+  - Примерная аренда в месяц: [расчёт]
+  - Gross Rent Multiplier: [расчёт]
+  - Cap Rate (примерный): [расчёт]
+
+✅ ПОДХОДИТ / ❌ НЕ ПОДХОДИТ критериям инвестора
+
+ПРИЧИНА: [объяснение]
+
+РЕКОМЕНДАЦИЯ: [что делать дальше]
+
+Если пользователь просто задаёт вопрос — отвечай как профессиональный консультант.
+Отвечай на языке пользователя (русский или английский)."""
 
 client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
 conversations = {}
+
+async def fetch_url(url: str) -> str:
+    try:
+        async with httpx.AsyncClient(timeout=10, follow_redirects=True) as c:
+            r = await c.get(url, headers={"User-Agent": "Mozilla/5.0"})
+            text = r.text[:5000]
+            return f"Содержимое страницы:\n{text}"
+    except Exception as e:
+        return f"Не удалось загрузить ссылку: {e}"
+
+def extract_url(text: str) -> str:
+    for word in text.split():
+        if word.startswith("http://") or word.startswith("https://"):
+            return word
+    return None
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -29,6 +62,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if user_id not in conversations:
         conversations[user_id] = []
+
+    url = extract_url(text)
+    if url:
+        await update.message.reply_text("🔍 Читаю ссылку и анализирую...")
+        page_content = await fetch_url(url)
+        text = f"Проанализируй эту недвижимость по моим критериям инвестора:\n{url}\n\n{page_content}"
 
     conversations[user_id].append({
         "role": "user",
@@ -42,7 +81,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     response = client.messages.create(
         model="claude-haiku-4-5-20251001",
-        max_tokens=1024,
+        max_tokens=2048,
         system=SYSTEM_PROMPT,
         messages=conversations[user_id]
     )
