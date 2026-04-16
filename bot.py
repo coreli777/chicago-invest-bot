@@ -1,6 +1,7 @@
 import os
 import logging
 import httpx
+import asyncio
 from telegram import Update
 from telegram.ext import Application, MessageHandler, filters, ContextTypes
 import anthropic
@@ -138,12 +139,62 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     })
 
     await update.message.reply_text(reply)
+async def search_new_listings(context):
+    google_key = os.environ.get("GOOGLE_API_KEY")
+    search_id  = os.environ.get("GOOGLE_SEARCH_ID")
+    bot_token  = os.environ.get("TELEGRAM_TOKEN")
+    chat_id    = "7037686908"
+
+    queries = [
+        "multifamily for sale Chicago under 700000 site:redfin.com",
+        "multifamily for sale Chicago under 700000 site:loopnet.com",
+    ]
+
+    found = []
+    async with httpx.AsyncClient() as client:
+        for query in queries:
+            url = "https://www.googleapis.com/customsearch/v1"
+            params = {
+                "key": google_key,
+                "cx": search_id,
+                "q": query,
+                "num": 3,
+                "dateRestrict": "d1"
+            }
+            try:
+                r = await client.get(url, params=params)
+                data = r.json()
+                items = data.get("items", [])
+                for item in items:
+                    found.append({
+                        "title": item.get("title"),
+                        "link": item.get("link"),
+                        "snippet": item.get("snippet")
+                    })
+            except Exception as e:
+                print(f"Search error: {e}")
+
+    if found:
+        msg = "🏠 <b>НОВЫЕ ОБЪЕКТЫ В ЧИКАГО!</b>\n\n"
+        for i, item in enumerate(found[:5], 1):
+            msg += f"{i}. <b>{item['title']}</b>\n"
+            msg += f"   {item['snippet'][:100]}...\n"
+            msg += f"   🔗 {item['link']}\n\n"
+
+        send_url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+        async with httpx.AsyncClient() as client:
+            await client.post(send_url, json={
+                "chat_id": chat_id,
+                "text": msg,
+                "parse_mode": "HTML"
+            })
 
 def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+    job_queue = app.job_queue
+    job_queue.run_repeating(search_new_listings, interval=21600, first=10)
+
     print("🚀 Бот запущен!")
     app.run_polling()
-
-if __name__ == "__main__":
-    main()
