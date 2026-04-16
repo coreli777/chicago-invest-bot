@@ -93,11 +93,25 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user_id not in conversations:
         conversations[user_id] = []
 
-    url = extract_url(text)
-    if url:
+    # Находим все ссылки в сообщении
+    urls = [word for word in text.split() if word.startswith("http://") or word.startswith("https://")]
+
+    if len(urls) > 1:
+        # Несколько ссылок — режим сравнения
+        await update.message.reply_text(f"📊 Нашёл {len(urls)} объекта — анализирую и сравниваю...")
+        
+        pages_content = ""
+        for i, url in enumerate(urls, 1):
+            content = await fetch_url(url)
+            pages_content += f"\n\n=== ОБЪЕКТ {i}: {url} ===\n{content}"
+
+        text = f"Сравни эти {len(urls)} объекта недвижимости по моим критериям инвестора. Для каждого сделай краткий анализ, потом дай итоговую таблицу сравнения и скажи какой лучше всего подходит:\n{pages_content}"
+
+    elif len(urls) == 1:
+        # Одна ссылка — обычный анализ
         await update.message.reply_text("🔍 Читаю ссылку и анализирую...")
-        page_content = await fetch_url(url)
-        text = f"Проанализируй эту недвижимость по моим критериям инвестора:\n{url}\n\n{page_content}"
+        page_content = await fetch_url(urls[0])
+        text = f"Проанализируй эту недвижимость по моим критериям инвестора:\n{urls[0]}\n\n{page_content}"
 
     conversations[user_id].append({
         "role": "user",
