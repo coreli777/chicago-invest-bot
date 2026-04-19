@@ -167,7 +167,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    app.job_queue.run_repeating(search_new_listings, interval=21600, first=30)
+    app.job_queue.run_repeating(search_new_listings, interval=60, first=10)
     print("🚀 Бот запущен!")
     app.run_polling()
 
