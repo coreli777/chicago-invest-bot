@@ -121,3 +121,5 @@ if __name__ == "__main__":
     server = HTTPServer(("0.0.0.0", PORT), HealthHandler)
     server.serve_forever()  # ← главный поток никогда не завершается
 
+
+
