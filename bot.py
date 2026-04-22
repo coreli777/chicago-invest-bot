@@ -12,7 +12,7 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 ANTHROPIC_KEY  = os.environ.get("ANTHROPIC_API_KEY")
 GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")
 GOOGLE_SEARCH_ID = os.environ.get("GOOGLE_SEARCH_ID")
-CHAT_ID = "7037686908"
+CHAT_ID = os.environ.get("CHAT_ID", "7037686908")
 
 SYSTEM_PROMPT = """Ты — профессиональный риелтор и инвестиционный консультант по недвижимости в Чикаго.
 
@@ -65,22 +65,11 @@ SYSTEM_PROMPT = """Ты — профессиональный риелтор и �
 ⚠️ Без отдельных счётчиков — НЕ ПОДХОДИТ
 ПРИЧИНА и РЕКОМЕНДАЦИЯ
 
+Когда получаешь данные из автопоиска — анализируй каждый объект по шаблону выше.
 Отвечай на языке пользователя."""
 
 client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
 conversations = {}
-
-def send_telegram_sync(msg):
-    import requests
-    try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        requests.post(url, json={
-            "chat_id": CHAT_ID,
-            "text": msg,
-            "parse_mode": "HTML"
-        })
-    except Exception as e:
-        print(f"Telegram error: {e}")
 
 async def fetch_url(url: str) -> str:
     try:
@@ -91,41 +80,76 @@ async def fetch_url(url: str) -> str:
         return f"Не удалось загрузить ссылку: {e}"
 
 async def search_new_listings(context):
-    print("🔍 Searching for new listings...")
+    print("🔍 Searching Zillow & Redfin...")
+
+    # Ищем именно на Zillow и Redfin
     queries = [
-        "multifamily for sale Chicago under 700000 new listing",
-        "apartment building for sale Chicago multifamily 2026",
+        "site:zillow.com multifamily Chicago IL 60000 700000",
+        "site:zillow.com \"multi family\" Chicago for sale under 700000",
+        "site:redfin.com multifamily Chicago IL for sale",
+        "site:realtor.com multi-family Chicago IL price-700000",
     ]
+
     found = []
-    async with httpx.AsyncClient(timeout=15) as client:
+    async with httpx.AsyncClient(timeout=15) as c:
         for query in queries:
             try:
-                r = await client.get(
+                r = await c.get(
                     "https://www.googleapis.com/customsearch/v1",
                     params={
                         "key": GOOGLE_API_KEY,
                         "cx": GOOGLE_SEARCH_ID,
                         "q": query,
                         "num": 3,
-                        "dateRestrict": "d1"
                     }
                 )
                 data = r.json()
-                for item in data.get("items", []):
-                    found.append(item)
+                items = data.get("items", [])
+                print(f"Query '{query[:40]}...' → {len(items)} results")
+
+                for item in items:
+                    link = item.get("link", "")
+                    title = item.get("title", "")
+                    snippet = item.get("snippet", "")
+
+                    # Фильтруем только объявления о продаже
+                    if any(kw in link.lower() or kw in title.lower() or kw in snippet.lower()
+                           for kw in ["for-sale", "for sale", "homedetails", "realestateandhomes"]):
+                        found.append(item)
+
             except Exception as e:
                 print(f"Search error: {e}")
 
     if found:
-        msg = "🏠 <b>НОВЫЕ ОБЪЕКТЫ В ЧИКАГО!</b>\n\n"
-        for i, item in enumerate(found[:5], 1):
-            msg += f"{i}. <b>{item.get('title', '')[:50]}</b>\n"
-            msg += f"   {item.get('snippet', '')[:100]}\n"
-            msg += f"   🔗 {item.get('link', '')}\n\n"
-        send_telegram_sync(msg)
-        print(f"✅ Sent {len(found)} listings")
+        # Убираем дубли по ссылке
+        seen = set()
+        unique = []
+        for item in found:
+            link = item.get("link", "")
+            if link not in seen:
+                seen.add(link)
+                unique.append(item)
+
+        msg = "🏠 <b>НАЙДЕНЫ НОВЫЕ ОБЪЕКТЫ В ЧИКАГО!</b>\n\n"
+        for i, item in enumerate(unique[:5], 1):
+            title = item.get("title", "")[:60]
+            snippet = item.get("snippet", "")[:120]
+            link = item.get("link", "")
+            msg += f"{i}. <b>{title}</b>\n"
+            msg += f"   {snippet}\n"
+            msg += f"   🔗 <a href='{link}'>Открыть объявление</a>\n\n"
+
+        msg += "💡 Отправьте ссылку боту для детального анализа!"
+
+        await context.bot.send_message(
+            chat_id=CHAT_ID,
+            text=msg,
+            parse_mode="HTML",
+            disable_web_page_preview=True
+        )
+        print(f"✅ Sent {len(unique)} listings to Telegram")
     else:
-        print("No new listings found")
+        print("⚠️ No listings found this round")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -144,7 +168,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pages += f"\n\n=== ОБЪЕКТ {i} ===\n{content}"
         text = f"Сравни эти объекты:\n{pages}"
     elif len(urls) == 1:
-        await update.message.reply_text("🔍 Анализирую...")
+        await update.message.reply_text("🔍 Анализирую объект...")
         content = await fetch_url(urls[0])
         text = f"Проанализируй:\n{urls[0]}\n{content}"
 
@@ -167,8 +191,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    app.job_queue.run_repeating(search_new_listings, interval=60, first=10)
-    print("🚀 Бот запущен!")
+
+    # Поиск каждые 30 минут (1800 сек) — не слишком часто чтобы не расходовать Google квоту
+    app.job_queue.run_repeating(search_new_listings, interval=1800, first=10)
+
+    print("🚀 Бот запущен! Автопоиск каждые 30 минут.")
     app.run_polling()
 
 if __name__ == "__main__":
