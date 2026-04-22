@@ -2,6 +2,8 @@ import os
 import logging
 import httpx
 import asyncio
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update
 from telegram.ext import Application, MessageHandler, filters, ContextTypes
 import anthropic
@@ -188,11 +190,29 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conversations[user_id].append({"role": "assistant", "content": reply})
     await update.message.reply_text(reply)
 
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"OK - Bot is running!")
+    def log_message(self, format, *args):
+        pass
+
+def run_health_server():
+    port = int(os.environ.get("PORT", 8080))
+    server = HTTPServer(("0.0.0.0", port), HealthHandler)
+    print(f"✅ Health server on port {port}")
+    server.serve_forever()
+
 def main():
+    # Запускаем HTTP сервер в отдельном потоке (требование Cloud Run)
+    t = threading.Thread(target=run_health_server, daemon=True)
+    t.start()
+
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    # Поиск каждые 30 минут (1800 сек) — не слишком часто чтобы не расходовать Google квоту
+    # Поиск каждые 30 минут
     app.job_queue.run_repeating(search_new_listings, interval=1800, first=10)
 
     print("🚀 Бот запущен! Автопоиск каждые 30 минут.")
