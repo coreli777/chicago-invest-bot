@@ -15,6 +15,25 @@ ANTHROPIC_KEY  = os.environ.get("ANTHROPIC_API_KEY")
 GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")
 GOOGLE_SEARCH_ID = os.environ.get("GOOGLE_SEARCH_ID")
 CHAT_ID = os.environ.get("CHAT_ID", "7037686908")
+PORT = int(os.environ.get("PORT", 8080))
+
+# ✅ HTTP сервер стартует ПЕРВЫМ — до всего остального
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain")
+        self.end_headers()
+        self.wfile.write(b"OK - Bot is running!")
+    def do_HEAD(self):
+        self.send_response(200)
+        self.end_headers()
+    def log_message(self, format, *args):
+        pass
+
+http_server = HTTPServer(("0.0.0.0", PORT), HealthHandler)
+http_thread = threading.Thread(target=http_server.serve_forever, daemon=True)
+http_thread.start()
+print(f"✅ HTTP server started on port {PORT}")
 
 SYSTEM_PROMPT = """Ты — профессиональный риелтор и инвестиционный консультант по недвижимости в Чикаго.
 
@@ -67,7 +86,6 @@ SYSTEM_PROMPT = """Ты — профессиональный риелтор и �
 ⚠️ Без отдельных счётчиков — НЕ ПОДХОДИТ
 ПРИЧИНА и РЕКОМЕНДАЦИЯ
 
-Когда получаешь данные из автопоиска — анализируй каждый объект по шаблону выше.
 Отвечай на языке пользователя."""
 
 client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
@@ -82,76 +100,38 @@ async def fetch_url(url: str) -> str:
         return f"Не удалось загрузить ссылку: {e}"
 
 async def search_new_listings(context):
-    print("🔍 Searching Zillow & Redfin...")
-
-    # Ищем именно на Zillow и Redfin
+    print("🔍 Searching listings...")
     queries = [
-        "site:zillow.com multifamily Chicago IL 60000 700000",
-        "site:zillow.com \"multi family\" Chicago for sale under 700000",
+        "site:zillow.com multifamily Chicago IL for sale under 700000",
         "site:redfin.com multifamily Chicago IL for sale",
         "site:realtor.com multi-family Chicago IL price-700000",
     ]
-
     found = []
     async with httpx.AsyncClient(timeout=15) as c:
         for query in queries:
             try:
                 r = await c.get(
                     "https://www.googleapis.com/customsearch/v1",
-                    params={
-                        "key": GOOGLE_API_KEY,
-                        "cx": GOOGLE_SEARCH_ID,
-                        "q": query,
-                        "num": 3,
-                    }
+                    params={"key": GOOGLE_API_KEY, "cx": GOOGLE_SEARCH_ID, "q": query, "num": 3}
                 )
-                data = r.json()
-                items = data.get("items", [])
-                print(f"Query '{query[:40]}...' → {len(items)} results")
-
-                for item in items:
-                    link = item.get("link", "")
-                    title = item.get("title", "")
-                    snippet = item.get("snippet", "")
-
-                    # Фильтруем только объявления о продаже
-                    if any(kw in link.lower() or kw in title.lower() or kw in snippet.lower()
-                           for kw in ["for-sale", "for sale", "homedetails", "realestateandhomes"]):
-                        found.append(item)
-
+                for item in r.json().get("items", []):
+                    found.append(item)
             except Exception as e:
                 print(f"Search error: {e}")
 
     if found:
-        # Убираем дубли по ссылке
         seen = set()
-        unique = []
-        for item in found:
-            link = item.get("link", "")
-            if link not in seen:
-                seen.add(link)
-                unique.append(item)
-
-        msg = "🏠 <b>НАЙДЕНЫ НОВЫЕ ОБЪЕКТЫ В ЧИКАГО!</b>\n\n"
+        unique = [item for item in found if item.get("link") not in seen and not seen.add(item.get("link"))]
+        msg = "🏠 <b>НОВЫЕ ОБЪЕКТЫ В ЧИКАГО!</b>\n\n"
         for i, item in enumerate(unique[:5], 1):
-            title = item.get("title", "")[:60]
-            snippet = item.get("snippet", "")[:120]
-            link = item.get("link", "")
-            msg += f"{i}. <b>{title}</b>\n"
-            msg += f"   {snippet}\n"
-            msg += f"   🔗 <a href='{link}'>Открыть объявление</a>\n\n"
-
-        msg += "💡 Отправьте ссылку боту для детального анализа!"
-
-        await context.bot.send_message(
-            chat_id=CHAT_ID,
-            text=msg,
-            parse_mode="HTML",
-            disable_web_page_preview=True
-        )
-        print(f"✅ Sent {len(unique)} listings to Telegram")
+            msg += f"{i}. <b>{item.get('title','')[:60]}</b>\n"
+            msg += f"   {item.get('snippet','')[:120]}\n"
+            msg += f"   🔗 <a href='{item.get('link','')}'>Открыть</a>\n\n"
+        msg += "💡 Отправьте ссылку для анализа!"
+        await context.bot.send_message(chat_id=CHAT_ID, text=msg, parse_mode="HTML", disable_web_page_preview=True)
+        print(f"✅ Sent {len(unique)} listings")
     else:
-        print("⚠️ No listings found this round")
+        print("⚠️ No listings found")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -190,32 +170,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conversations[user_id].append({"role": "assistant", "content": reply})
     await update.message.reply_text(reply)
 
-class HealthHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"OK - Bot is running!")
-    def log_message(self, format, *args):
-        pass
-
-def run_health_server():
-    port = int(os.environ.get("PORT", 8080))
-    server = HTTPServer(("0.0.0.0", port), HealthHandler)
-    print(f"✅ Health server on port {port}")
-    server.serve_forever()
-
 def main():
-    # Запускаем HTTP сервер в отдельном потоке (требование Cloud Run)
-    t = threading.Thread(target=run_health_server, daemon=True)
-    t.start()
-
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
-    # Поиск каждые 30 минут
-    app.job_queue.run_repeating(search_new_listings, interval=1800, first=10)
-
-    print("🚀 Бот запущен! Автопоиск каждые 30 минут.")
+    app.job_queue.run_repeating(search_new_listings, interval=1800, first=30)
+    print("🚀 Telegram бот запущен!")
     app.run_polling()
 
 if __name__ == "__main__":
